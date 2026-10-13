@@ -59,16 +59,58 @@ def blob_check(a, b):
     return overlap >= min_overlap * shorter
 
 
+MIN_PATTERN_CONTRAST = 0.3   # red amount must differ this much between top and bottom half
+MIN_RED_IN_RED_HALF = 0.5    # the "red half" must be at least half red (rejects stray pixels)
+MIN_CONFIDENCE = 0.5         # below this, return invisible. Starting guess; tune on your data.
+
+
+def post_pattern(red_mask, box):
+    """Return ("left" | "right" | None, score 0-1) from the red/black layout of a blob."""
+    x, y, w, h = box
+    crop = red_mask[y:y + h, x:x + w]
+    mid = h // 2
+    if mid < 1:
+        return None, 0.0
+    top, bottom = crop[:mid], crop[mid:]
+    top_red = np.count_nonzero(top) / top.size        # fraction of top half that is red
+    bottom_red = np.count_nonzero(bottom) / bottom.size
+
+    # the red half has to be mostly red, not just a few stray pixels
+    if max(top_red, bottom_red) < MIN_RED_IN_RED_HALF:
+        return None, 0.0
+
+    contrast = bottom_red - top_red
+    if contrast >= MIN_PATTERN_CONTRAST:
+        return "left", contrast       # black top, red bottom
+    if contrast <= -MIN_PATTERN_CONTRAST:
+        return "right", -contrast     # red top, black bottom
+    return None, 0.0
+
+
+def gate_confidence(left, right):
+    """Color score scaled by geometry. Geometry can lower it, never replace it."""
+    pattern = (left[5] + right[5]) / 2.0
+    taller, shorter = max(left[3], right[3]), min(left[3], right[3])
+    height_similarity = shorter / taller
+    top_alignment = 1.0 - min(1.0, abs(left[1] - right[1]) / taller)
+    geometry = (height_similarity + top_alignment) / 2.0
+    return pattern * (0.5 + 0.5 * geometry)
+
 def best_pair(candidates, max_candidates=6):
-    """Largest valid pair among the biggest candidates, ordered left to right."""
+    """Best valid pair: left blob must be a left post, right blob a right post."""
     top = sorted(candidates, key=lambda c: c[-1], reverse=True)[:max_candidates]
-    best, best_area = [], 0.0
+    best, best_score = [], 0.0
     for i in range(len(top)):
         for j in range(i + 1, len(top)):
-            area = top[i][-1] + top[j][-1]
-            if blob_check(top[i], top[j]) and area > best_area:
-                best, best_area = [top[i], top[j]], area
-    return sorted(best, key=lambda c: c[0])
+            if not blob_check(top[i], top[j]):
+                continue
+            left, right = sorted((top[i], top[j]), key=lambda c: c[0])
+            if left[4] != "left" or right[4] != "right":
+                continue
+            score = left[5] + right[5]
+            if score > best_score:
+                best, best_score = [left, right], score
+    return best
 
 @register_perceiver(task="gate", algo="intro_classical")
 class ClassicalGatePerceiver(TaskPerceiver):
@@ -124,11 +166,15 @@ class ClassicalGatePerceiver(TaskPerceiver):
         
         # if you're inside all 3 ranges you become white, outside you're black
         # so now we get a black and white picture called a mask
-        red_mask = cv.inRange(
-            hsv, 
-            np.array((r_h_min, r_s_min, r_v_min)), 
-            np.array((r_h_max, 255, 255))
-        )
+        #red_mask = cv.inRange(
+        #    hsv, 
+        #    np.array((r_h_min, r_s_min, r_v_min)), 
+        #    np.array((r_h_max, 255, 255))
+        #)
+        
+        red_low = cv.inRange(hsv, np.array((r_h_min, r_s_min, r_v_min)), np.array((r_h_max, 255, 255)))
+        red_high = cv.inRange(hsv, np.array((170, r_s_min, r_v_min)), np.array((180, 255, 255)))
+        red_mask = cv.bitwise_or(red_low, red_high)
         
         # Broad black mask
         black_mask = cv.inRange(
@@ -142,13 +188,27 @@ class ClassicalGatePerceiver(TaskPerceiver):
         
         contours = cv.findContours(combined_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)[-2]
 
+        #candidates = []
+        #for contour in contours:
+           #area = float(cv.contourArea(contour))
+            #x, y, width, height = cv.boundingRect(contour)
+            # Basic vertical aspect ratio check
+            #if area >= 30.0 and height >= max(10, int(width * 1.2)):
+                #candidates.append((x, y, width, height, area))
+        
+        
+
         candidates = []
+        rejected = []   # blobs that failed the color check (shown in yellow in debug)
         for contour in contours:
             area = float(cv.contourArea(contour))
             x, y, width, height = cv.boundingRect(contour)
-            # Basic vertical aspect ratio check
             if area >= 30.0 and height >= max(10, int(width * 1.2)):
-                candidates.append((x, y, width, height, area))
+                side, score = post_pattern(red_mask, (x, y, width, height))
+                if side is None:
+                    rejected.append((x, y, width, height))
+                    continue
+                candidates.append((x, y, width, height, side, score, area))
         
         # Sort by area and pick top 2
         candidates.sort(key=lambda c: c[-1], reverse=True)
@@ -158,7 +218,8 @@ class ClassicalGatePerceiver(TaskPerceiver):
         # IMPORTANT: if only 1 post is selected the algo still concludes no gate.
         estimate = GateEstimate.invisible()
         
-        if len(selected) == 2:
+        confidence = gate_confidence(*selected) if len(selected) == 2 else 0.0
+        if len(selected) == 2 and confidence >= MIN_CONFIDENCE:
             left_post, right_post = selected
             
             x1 = min(left_post[0], right_post[0])
@@ -170,9 +231,9 @@ class ClassicalGatePerceiver(TaskPerceiver):
             right_center = right_post[0] + right_post[2] / 2.0
 
             # This is the confidence score..
-            separation = abs(right_center - left_center) / frame.shape[1]
-            area_fraction = (left_post[-1] + right_post[-1]) / (frame.shape[0] * frame.shape[1])
-            confidence = min(1.0, separation * 1.5 + area_fraction * 8.0)
+            #separation = abs(right_center - left_center) / frame.shape[1]
+            #area_fraction = (left_post[-1] + right_post[-1]) / (frame.shape[0] * frame.shape[1])
+            #confidence = min(1.0, separation * 1.5 + area_fraction * 8.0)
             
             estimate = GateEstimate(
                 True,
@@ -184,15 +245,28 @@ class ClassicalGatePerceiver(TaskPerceiver):
                 (x2 - x1) / frame.shape[1],
                 (y2 - y1) / frame.shape[0],
             ).normalized()
- 
+
+        print("conf:", round(confidence, 2), "pairs:", [(s[4], round(s[5], 2)) for s in selected])
+        
         if not debug:
             return estimate
             
-        annotated = annotate(frame, estimate)
-        for x, y, width, height, _ in selected:
-            cv.rectangle(annotated, (x, y), (x + width, y + height), (0, 255, 0), 2)
+        #annotated = annotate(frame, estimate)
+        #for x, y, width, height, _ in selected:
+           # cv.rectangle(annotated, (x, y), (x + width, y + height), (0, 255, 0), 2)
             
-        return estimate, [annotated, cv.cvtColor(combined_mask, cv.COLOR_GRAY2BGR)]
+        #return estimate, [annotated, cv.cvtColor(combined_mask, cv.COLOR_GRAY2BGR)]
+
+        annotated = annotate(frame, estimate)
+        for x, y, width, height, *_ in selected:          # note *_ now, not _
+            cv.rectangle(annotated, (x, y), (x + width, y + height), (0, 255, 0), 2)
+        for x, y, width, height in rejected:              # yellow = failed color check
+            cv.rectangle(annotated, (x, y), (x + width, y + height), (0, 255, 255), 1)
+
+        def to_bgr(m):
+            return cv.cvtColor(m, cv.COLOR_GRAY2BGR)
+
+        return estimate, [annotated, to_bgr(red_mask), to_bgr(black_mask), to_bgr(combined_mask)]
 
 def annotate(frame, estimate, label_prefix="classical"):
     canvas = frame.copy()
