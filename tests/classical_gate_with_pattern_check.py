@@ -11,12 +11,8 @@ from perception.tasks.TaskPerceiver import TaskPerceiver
 from perception.tasks.registry import register_perceiver
  
 from intro_perception.types import GateEstimate
- 
-# ---------------------------------------------------------------------------
-# NEW: tunable constants. These are STARTING GUESSES, not calibrated values.
-# Tune them by looking at your images (and later at evaluate output).
-# ---------------------------------------------------------------------------
- 
+
+
 # Red also appears at the top of OpenCV's hue range (170-180), because hue is a
 # circle: 179 and 0 are both "red". Your old range (0-10) only caught one side.
 RED_WRAP_H_MIN = 170

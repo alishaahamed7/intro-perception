@@ -8,7 +8,7 @@ from intro_perception.classical import ClassicalGatePerceiver
 FIXTURES = Path(__file__).parent / "fixtures"
 
 
-@pytest.mark.xfail(strict=True, reason="starter detector reports a gate in a no-gate photo")
+#@pytest.mark.xfail(strict=True, reason="starter detector reports a gate in a no-gate photo")
 def test_no_gate_photo_reports_no_gate():
     image = cv2.imread(str(FIXTURES / "false_alarm.jpg"))
     assert image is not None

@@ -31,16 +31,24 @@ def blob_check(a, b):
     ay = a[1]   # y; the top edge
     aw = a[2]   # width
     ah = a[3]   # height
+    ax_bottom = ay + ah
 
     bx = b[0]
     by = b[1]
     bw = b[2]
     bh = b[3]
+    bx_bottom = by + bh
     
     # this prevents a post and its reflection from being registered as a gate
+    # by checking what horizontal area is being overlapped
+
+    
     if min(ax + aw, bx + bw) > max(ax, bx):
         return False
-    taller, shorter = max(ah, bh), min(ah, bh)
+    
+    taller = max(ah, bh)
+    shorter = min(ah, bh)
+    
     
     # we want our posts to have similar height
     # sometimes the algo registers two "posts" but they appear in totally different locations in the picture
@@ -60,8 +68,8 @@ def blob_check(a, b):
 
 
 MIN_PATTERN_CONTRAST = 0.3   # red amount must differ this much between top and bottom half
-MIN_RED_IN_RED_HALF = 0.5    # the "red half" must be at least half red (rejects stray pixels)
-MIN_CONFIDENCE = 0.5         # below this, return invisible. Starting guess; tune on your data.
+MIN_RED_IN_RED_HALF = 0.3    # the "red half" must be at least half red (rejects stray pixels)
+MIN_CONFIDENCE = 0.2         # below this, return invisible. Starting guess; tune on your data.
 
 
 def post_pattern(red_mask, box):
@@ -126,9 +134,9 @@ class ClassicalGatePerceiver(TaskPerceiver):
         # - must be why the algo is detecting shadows, reflections, or other objects as gates
         super().__init__(
             red_h_min=((0, 180), 0),
-            red_h_max=((0, 180), 10), # hue must be between 0 and 10
-            red_s_min=((0, 255), 100), # saturation must be at least 100 out of 225
-            red_v_min=((0, 255), 100), # value (how bright) must be at least 100 out of 225
+            red_h_max=((0, 180), 25), # hue must be between 0 and 10 #changed to 25
+            red_s_min=((0, 255), 35), # saturation must be at least 100 out of 225
+            red_v_min=((0, 255), 35), # value (how bright) must be at least 100 out of 225
             black_v_max=((0, 255), 110), # OG: black's brightness must be no more than 50 out of 225
                                             # I am changing it to 110 out of 225
 
@@ -152,9 +160,12 @@ class ClassicalGatePerceiver(TaskPerceiver):
 
         # Slider controls for HSV tuning
         r_h_min = slider_vals.get("red_h_min", 0)
-        r_h_max = slider_vals.get("red_h_max", 10)
-        r_s_min = slider_vals.get("red_s_min", 100)
-        r_v_min = slider_vals.get("red_v_min", 100)
+        r_h_max = slider_vals.get("red_h_max", 25)
+        r_s_min = slider_vals.get("red_s_min", 35)
+        r_v_min = slider_vals.get("red_v_min", 35)
+        # fix the ranges on here because they're still not capturing red correctly
+        # need to take size into consideration too
+        #
         
         b_v_max = slider_vals.get("black_v_max", 110) # initially 50, I am changing to 110
         
@@ -173,7 +184,7 @@ class ClassicalGatePerceiver(TaskPerceiver):
         #)
         
         red_low = cv.inRange(hsv, np.array((r_h_min, r_s_min, r_v_min)), np.array((r_h_max, 255, 255)))
-        red_high = cv.inRange(hsv, np.array((170, r_s_min, r_v_min)), np.array((180, 255, 255)))
+        red_high = cv.inRange(hsv, np.array((120, r_s_min, r_v_min)), np.array((180, 255, 255)))
         red_mask = cv.bitwise_or(red_low, red_high)
         
         # Broad black mask
@@ -184,7 +195,8 @@ class ClassicalGatePerceiver(TaskPerceiver):
         )
 
         combined_mask = cv.bitwise_or(red_mask, black_mask)
-        combined_mask = cv.morphologyEx(combined_mask, cv.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        k = max(15, frame.shape[0] // 25)
+        combined_mask = cv.morphologyEx(combined_mask, cv.MORPH_OPEN, np.ones((k, 3), np.uint8))
         
         contours = cv.findContours(combined_mask, cv.RETR_EXTERNAL, cv.CHAIN_APPROX_SIMPLE)[-2]
 
@@ -246,7 +258,7 @@ class ClassicalGatePerceiver(TaskPerceiver):
                 (y2 - y1) / frame.shape[0],
             ).normalized()
 
-        print("conf:", round(confidence, 2), "pairs:", [(s[4], round(s[5], 2)) for s in selected])
+        #print("conf:", round(confidence, 2), "pairs:", [(s[4], round(s[5], 2)) for s in selected])
         
         if not debug:
             return estimate
